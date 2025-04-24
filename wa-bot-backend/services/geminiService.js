@@ -1,9 +1,4 @@
-const GoogleGenerativeAiLibrary = require('@google/generative-ai');
-const GoogleGenerativeAI = GoogleGenerativeAiLibrary.GoogleGenerativeAI;
-const Type = GoogleGenerativeAiLibrary.Type;
-
-// Add log to verify Type after import
-console.log(">>>>> Type after alternative import:", Type);
+import { GoogleGenAI, Type } from "@google/genai";
 
 // Gemini Config
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
@@ -12,60 +7,46 @@ if (!GEMINI_API_KEY) {
     process.exit(1);
 }
 
-const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-const geminiModel = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
 // Define the expected JSON response schema from Gemini
 const GEMINI_RESPONSE_SCHEMA = {
-        type: Type.OBJECT,
-        properties: {
-            'intent': {
-                type: Type.STRING,
-                description: "The user's intent (ADD_REMINDER, LIST_REMINDERS, DELETE_REMINDER, EDIT_REMINDER, UNKNOWN)",
-                enum: [ // Explicitly list possible intents
-                    "ADD_REMINDER",
-                    "LIST_REMINDERS",
-                    "DELETE_REMINDER",
-                    "EDIT_REMINDER",
-                    "UNKNOWN"
-                ]
-            },
-            'data': {
-                type: Type.OBJECT,
-                description: "Extracted data based on intent. Empty object for LIST_REMINDERS and UNKNOWN.",
-                nullable: true, // Allow data to be null or empty object
-                properties: {
-                    'task': {
-                        type: Type.STRING,
-                        description: "The description of the task for ADD_REMINDER or EDIT_REMINDER.",
-                        nullable: true // Task might not be present for delete/list/unknown
-                    },
-                    'time': {
-                        type: Type.STRING,
-                        description: "The time string (natural language or ISO 8601 attempt) for ADD_REMINDER or EDIT_REMINDER's updates.",
-                        nullable: true // Time might not be present
-                    },
-                    'target': {
-                        type: Type.STRING,
-                        description: "Keywords identifying the reminder to DELETE or EDIT.",
-                        nullable: true // Target only relevant for delete/edit
-                    },
-                    'updates': {
-                        type: Type.OBJECT,
-                        description: "Object containing new task and/or time for EDIT_REMINDER.",
-                        nullable: true, // Updates only relevant for edit
-                        properties: {
-                            'task': { type: Type.STRING, description: "New task description.", nullable: true },
-                            'time': { type: Type.STRING, description: "New time string.", nullable: true }
-                        }
-                    }
-                },
-                // Define property order for consistency
-                propertyOrdering: ["task", "time", "target", "updates"]
-            }
+    type: Type.OBJECT,
+    properties: {
+        'intent': {
+            type: Type.STRING,
+            description: "The user's intent",
+            enum: [
+                "ADD_REMINDER",
+                "LIST_REMINDERS",
+                "DELETE_REMINDER",
+                "EDIT_REMINDER",
+                "UNKNOWN"
+            ],
+            nullable: false
         },
-        required: ['intent', 'data'] // Intent and data object are always required
-    };
+        'data': {
+            type: Type.OBJECT,
+            description: "Extracted data based on intent",
+            properties: {
+                'task': { type: Type.STRING, nullable: true },
+                'time': { type: Type.STRING, nullable: true },
+                'target': { type: Type.STRING, nullable: true },
+                'updates': {
+                    type: Type.OBJECT,
+                    properties: {
+                        'task': { type: Type.STRING, nullable: true },
+                        'time': { type: Type.STRING, nullable: true }
+                    },
+                    nullable: true
+                }
+            },
+            propertyOrdering: ["task", "time", "target", "updates"],
+            nullable: true
+        }
+    },
+    required: ['intent', 'data']
+};
 
 /**
  * Analyze message with Gemini to determine intent and extract data
@@ -93,46 +74,22 @@ async function analyzeMessageWithGemini(messageText) {
 
     try {
         // Call generateContent with structured output configuration
-        const result = await geminiModel.generateContent({
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.0-flash',
             contents: contents,
-            systemInstruction: { parts: [{ text: systemInstruction }] }, // Use system instruction
-            generationConfig: { // Configure for JSON output
-                responseMimeType: "application/json",
-                responseSchema: GEMINI_RESPONSE_SCHEMA // Use the defined schema
+            systemInstruction: { parts: [{ text: systemInstruction }] },
+            config: {
+                responseMimeType: 'application/json',
+                responseSchema: GEMINI_RESPONSE_SCHEMA
             }
         });
 
-        const response = result.response; // Access the response object
-
-        // Check for safety ratings or blocks if necessary
-        if (response.promptFeedback?.blockReason) {
-            throw new Error(`Blocked by API: ${response.promptFeedback.blockReason}`);
-        }
-
-        // Because we requested JSON, the response text should be valid JSON
         const jsonText = response.text();
-        console.log("Gemini JSON Response Text:", jsonText);
-
-        // Parse the guaranteed JSON response
-        const analysis = JSON.parse(jsonText);
-        console.log("Gemini Parsed Analysis (Structured):", analysis);
-
-        // Basic validation (schema should enforce structure, but double-check)
-        if (!analysis.intent || typeof analysis.data === 'undefined') { // Check if data key exists, even if null/empty
-            console.error("Unexpected JSON structure despite schema:", analysis);
-            throw new Error("Invalid JSON structure received from Gemini");
-        }
-
-        return analysis; // Return the parsed object
-
+        console.log("Gemini Response:", jsonText);
+        return JSON.parse(jsonText);
     } catch (error) {
-        console.error("Error calling or processing Gemini API:", error);
-        // If error contains the raw text, log it
-        if (error.message.includes("JSON.parse")) {
-            // This shouldn't happen often with schema enforcement
-            console.error("Failed to parse JSON response from Gemini, even with schema.");
-        }
-        return { intent: 'UNKNOWN', data: {}, error: `Gemini processing failed: ${error.message}` };
+        console.error("Error processing Gemini request:", error);
+        return { intent: 'UNKNOWN', data: {}, error: error.message };
     }
 }
 
