@@ -11,61 +11,71 @@ const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 const geminiModel = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
 // Define the expected JSON response schema from Gemini
-// Debug logging for Type
+let GEMINI_RESPONSE_SCHEMA; // Define outside if block
+
 console.log("--- DEBUG: Checking Type before schema definition ---");
-console.log("Value of Type:", Type);
-console.log("Value of Type.OBJECT:", Type ? Type.OBJECT : 'Type is undefined');
-console.log("--- END DEBUG ---");
-const GEMINI_RESPONSE_SCHEMA = {
-    type: Type.OBJECT,
-    properties: {
-        'intent': {
-            type: Type.STRING,
-            description: "The user's intent (ADD_REMINDER, LIST_REMINDERS, DELETE_REMINDER, EDIT_REMINDER, UNKNOWN)",
-            enum: [ // Explicitly list possible intents
-                "ADD_REMINDER",
-                "LIST_REMINDERS",
-                "DELETE_REMINDER",
-                "EDIT_REMINDER",
-                "UNKNOWN"
-            ]
-        },
-        'data': {
-            type: Type.OBJECT,
-            description: "Extracted data based on intent. Empty object for LIST_REMINDERS and UNKNOWN.",
-            nullable: true, // Allow data to be null or empty object
-            properties: {
-                'task': {
-                    type: Type.STRING,
-                    description: "The description of the task for ADD_REMINDER or EDIT_REMINDER.",
-                    nullable: true // Task might not be present for delete/list/unknown
-                },
-                'time': {
-                    type: Type.STRING,
-                    description: "The time string (natural language or ISO 8601 attempt) for ADD_REMINDER or EDIT_REMINDER's updates.",
-                    nullable: true // Time might not be present
-                },
-                'target': {
-                    type: Type.STRING,
-                    description: "Keywords identifying the reminder to DELETE or EDIT.",
-                    nullable: true // Target only relevant for delete/edit
-                },
-                'updates': {
-                    type: Type.OBJECT,
-                    description: "Object containing new task and/or time for EDIT_REMINDER.",
-                    nullable: true, // Updates only relevant for edit
-                    properties: {
-                        'task': { type: Type.STRING, description: "New task description.", nullable: true },
-                        'time': { type: Type.STRING, description: "New time string.", nullable: true }
-                    }
-                }
+console.log("Value of Type right before check:", Type);
+
+if (Type && typeof Type === 'object') {
+    console.log("--- DEBUG: Type seems defined, attempting to define schema... ---");
+    GEMINI_RESPONSE_SCHEMA = {
+        type: Type.OBJECT,
+        properties: {
+            'intent': {
+                type: Type.STRING,
+                description: "The user's intent (ADD_REMINDER, LIST_REMINDERS, DELETE_REMINDER, EDIT_REMINDER, UNKNOWN)",
+                enum: [ // Explicitly list possible intents
+                    "ADD_REMINDER",
+                    "LIST_REMINDERS",
+                    "DELETE_REMINDER",
+                    "EDIT_REMINDER",
+                    "UNKNOWN"
+                ]
             },
-            // Define property order for consistency
-            propertyOrdering: ["task", "time", "target", "updates"]
-        }
-    },
-    required: ['intent', 'data'] // Intent and data object are always required
-};
+            'data': {
+                type: Type.OBJECT,
+                description: "Extracted data based on intent. Empty object for LIST_REMINDERS and UNKNOWN.",
+                nullable: true, // Allow data to be null or empty object
+                properties: {
+                    'task': {
+                        type: Type.STRING,
+                        description: "The description of the task for ADD_REMINDER or EDIT_REMINDER.",
+                        nullable: true // Task might not be present for delete/list/unknown
+                    },
+                    'time': {
+                        type: Type.STRING,
+                        description: "The time string (natural language or ISO 8601 attempt) for ADD_REMINDER or EDIT_REMINDER's updates.",
+                        nullable: true // Time might not be present
+                    },
+                    'target': {
+                        type: Type.STRING,
+                        description: "Keywords identifying the reminder to DELETE or EDIT.",
+                        nullable: true // Target only relevant for delete/edit
+                    },
+                    'updates': {
+                        type: Type.OBJECT,
+                        description: "Object containing new task and/or time for EDIT_REMINDER.",
+                        nullable: true, // Updates only relevant for edit
+                        properties: {
+                            'task': { type: Type.STRING, description: "New task description.", nullable: true },
+                            'time': { type: Type.STRING, description: "New time string.", nullable: true }
+                        }
+                    }
+                },
+                // Define property order for consistency
+                propertyOrdering: ["task", "time", "target", "updates"]
+            }
+        },
+        required: ['intent', 'data'] // Intent and data object are always required
+    };
+    console.log("--- DEBUG: Schema potentially defined. ---");
+} else {
+    console.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+    console.error("FATAL: 'Type' is undefined or not an object when needed for schema!");
+    console.error("Value of Type was:", Type);
+    console.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+    throw new Error("'Type' from @google/generative-ai is not available.");
+}
 
 /**
  * Analyze message with Gemini to determine intent and extract data
@@ -73,6 +83,16 @@ const GEMINI_RESPONSE_SCHEMA = {
  * @returns {Object} Analysis result with intent and extracted data
  */
 async function analyzeMessageWithGemini(messageText) {
+    // Ensure schema was properly defined
+    if (!GEMINI_RESPONSE_SCHEMA) {
+        console.error("CRITICAL: GEMINI_RESPONSE_SCHEMA was not defined!");
+        return {
+            intent: 'UNKNOWN',
+            data: {},
+            error: 'Internal configuration error: Schema missing.'
+        };
+    }
+
     // System instruction defines the bot's role and overall task
     const systemInstruction = "You are a helpful reminder bot assistant. Analyze the user's request to determine their intent (ADD_REMINDER, LIST_REMINDERS, DELETE_REMINDER, EDIT_REMINDER, or UNKNOWN) and extract relevant data according to the provided JSON schema. Focus only on reminder-related tasks.";
 
