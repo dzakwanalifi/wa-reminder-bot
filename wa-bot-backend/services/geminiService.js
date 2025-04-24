@@ -1,4 +1,4 @@
-import { GoogleGenAI, Type } from "@google/genai";
+const { GoogleGenAI, Type } = require('@google/genai');
 
 // Gemini Config
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
