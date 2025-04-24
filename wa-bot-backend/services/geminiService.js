@@ -1,4 +1,9 @@
-const { GoogleGenerativeAI, Type } = require('@google/generative-ai');
+const GoogleGenerativeAiLibrary = require('@google/generative-ai');
+const GoogleGenerativeAI = GoogleGenerativeAiLibrary.GoogleGenerativeAI;
+const Type = GoogleGenerativeAiLibrary.Type;
+
+// Add log to verify Type after import
+console.log(">>>>> Type after alternative import:", Type);
 
 // Gemini Config
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
@@ -11,14 +16,7 @@ const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 const geminiModel = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
 // Define the expected JSON response schema from Gemini
-let GEMINI_RESPONSE_SCHEMA; // Define outside if block
-
-console.log("--- DEBUG: Checking Type before schema definition ---");
-console.log("Value of Type right before check:", Type);
-
-if (Type && typeof Type === 'object') {
-    console.log("--- DEBUG: Type seems defined, attempting to define schema... ---");
-    GEMINI_RESPONSE_SCHEMA = {
+const GEMINI_RESPONSE_SCHEMA = {
         type: Type.OBJECT,
         properties: {
             'intent': {
@@ -68,14 +66,6 @@ if (Type && typeof Type === 'object') {
         },
         required: ['intent', 'data'] // Intent and data object are always required
     };
-    console.log("--- DEBUG: Schema potentially defined. ---");
-} else {
-    console.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
-    console.error("FATAL: 'Type' is undefined or not an object when needed for schema!");
-    console.error("Value of Type was:", Type);
-    console.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
-    throw new Error("'Type' from @google/generative-ai is not available.");
-}
 
 /**
  * Analyze message with Gemini to determine intent and extract data
