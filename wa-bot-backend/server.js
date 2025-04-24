@@ -6,6 +6,7 @@ const express = require('express');
 const fetch = require('node-fetch'); // Or use axios if you installed that
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { parseISO, formatISO, add, format } = require('date-fns'); // Tambahkan format di sini
+const chrono = require('chrono-node'); // Parse natural language time strings
 
 // --- Configuration ---
 const PORT = process.env.PORT || 4000;
@@ -61,17 +62,27 @@ async function sendWhatsAppMessage(userId, message) {
 // Function to analyze message with Gemini
 async function analyzeMessageWithGemini(messageText) {
     const prompt = `
-        Analyze the following user request for a reminder bot and identify the user's intent and extract relevant data.
-        Possible intents are: ADD_REMINDER, LIST_REMINDERS, UNKNOWN.
-        For ADD_REMINDER, extract the 'task' (what to be reminded about) and 'time' (when to be reminded, try to resolve relative times like "besok jam 10 pagi", "5 menit lagi" into a somewhat parsable format or keep the natural language time if unsure).
-        For LIST_REMINDERS, no specific data extraction is needed beyond the intent.
-        If the intent is unclear or doesn't fit, classify as UNKNOWN.
+    Analyze the following user request for a reminder bot and identify the user's intent and extract relevant data.
+    Possible intents are: ADD_REMINDER, LIST_REMINDERS, DELETE_REMINDER, EDIT_REMINDER, UNKNOWN.
 
-        Respond ONLY with a JSON object with keys 'intent' and 'data'. 'data' should be an object containing extracted entities like 'task' and 'time' (for ADD_REMINDER) or be an empty object for other intents.
+    - For ADD_REMINDER: Extract 'task' (what to be reminded about) and 'time' (when to be reminded).
+    - For LIST_REMINDERS: No specific data extraction needed beyond the intent.
+    - For DELETE_REMINDER: Extract a 'target' (description keywords of the reminder to delete, e.g., "meeting", "gammafest", "yang pertama").
+    - For EDIT_REMINDER: Extract a 'target' (description keywords of the reminder to edit) AND an 'updates' object containing the new 'task' and/or 'time'.
+    - If the intent is unclear or doesn't fit, classify as UNKNOWN.
 
-        User request: "${messageText}"
+    Try to parse extracted 'time' values into ISO 8601 format (UTC timezone, e.g., YYYY-MM-DDTHH:MM:SSZ) if possible. If you cannot determine a precise time, return the natural language string.
 
-        JSON Response:
+    Respond ONLY with a JSON object with keys 'intent' and 'data'.
+    - 'data' for ADD_REMINDER: { "task": "...", "time": "..." }
+    - 'data' for LIST_REMINDERS: {}
+    - 'data' for DELETE_REMINDER: { "target": "..." }
+    - 'data' for EDIT_REMINDER: { "target": "...", "updates": { "task": "...", "time": "..." } } (task/time in updates are optional)
+    - 'data' for UNKNOWN: {}
+
+    User request: "${messageText}"
+
+    JSON Response:
     `;
 
     try {
@@ -103,46 +114,223 @@ async function analyzeMessageWithGemini(messageText) {
 // Basic Time Parser (VERY limited, might need significant improvement or dedicated library like chrono-node)
 // Tries to convert simple relative terms or assumes a specific format might come from Gemini.
 // Returns an ISO string in UTC or null if parsing fails.
-function parseNaturalLanguageTime(timeString) {
+// Updated Time Parser using chrono-node
+function parseNaturalLanguageTime(timeString, referenceDate = new Date()) {
     if (!timeString) return null;
-    const lowerTimeString = timeString.toLowerCase();
-    const now = new Date();
-
+    console.log(`Attempting to parse time string with Chrono: "${timeString}"`);
     try {
-        // Very simple examples - THIS NEEDS TO BE MUCH MORE ROBUST
-        if (lowerTimeString.includes("besok jam")) {
-            const hourMatch = lowerTimeString.match(/jam (\d{1,2})/);
-            if (hourMatch) {
-                const hour = parseInt(hourMatch[1], 10);
-                let targetDate = add(now, { days: 1 });
-                targetDate.setHours(hour, 0, 0, 0); // Set jam, menit, detik, ms
-                return formatISO(targetDate); // Returns ISO string like "2024-07-16T10:00:00+07:00" (depends on server TZ)
-                                            // Ideally convert to UTC before storing: targetDate.toISOString()
-            }
-        } else if (lowerTimeString.includes("menit lagi")) {
-             const minuteMatch = lowerTimeString.match(/(\d+) menit lagi/);
-             if (minuteMatch) {
-                 const minutes = parseInt(minuteMatch[1], 10);
-                 const targetDate = add(now, { minutes: minutes });
-                 return formatISO(targetDate); // targetDate.toISOString() for UTC
-             }
+        // Chrono akan coba mengurai string relatif terhadap referenceDate (waktu sekarang)
+        // forwardDate: true -> penting agar "Jumat jam 5 sore" diartikan Jumat depan, bukan yg sudah lewat
+        const parsedResults = chrono.parse(timeString, referenceDate, { forwardDate: true });
+
+        // Chrono.parse mengembalikan array, ambil hasil yang paling mungkin (pertama)
+        if (parsedResults && parsedResults.length > 0) {
+            const parsedDate = parsedResults[0].start.date(); // Ambil objek Date dari hasil parse
+            console.log(`Chrono parsed "${timeString}" to: ${parsedDate.toISOString()}`);
+            // Selalu simpan dalam UTC untuk konsistensi
+            return parsedDate.toISOString(); // Kembalikan format ISO 8601 UTC
+        } else {
+            console.warn(`Chrono could not parse time string: "${timeString}"`);
+            return null; // Gagal parse
         }
-        // Add more complex parsing rules here...
-        // Or potentially try parsing directly if Gemini provides a standard-ish format
-        // const parsedDate = parseISO(timeString); // Example if Gemini gave "2024-07-15T15:30:00Z"
-        // if (!isNaN(parsedDate)) {
-        //     return parsedDate.toISOString();
-        // }
-
-        console.warn(`Could not parse time string: "${timeString}". Needs better parsing logic.`);
-        return null; // Indicate parsing failure
-
     } catch (error) {
-        console.error(`Error parsing time string "${timeString}":`, error);
-        return null;
+        console.error(`Error parsing time string "${timeString}" with Chrono:`, error);
+        return null; // Error saat parsing
     }
 }
 
+
+// --- Helper Functions for Edit/Delete ---
+
+// Helper to find potential reminder targets
+async function findReminderTargets(userId, targetDescription) {
+    if (!targetDescription) return { error: 'Deskripsi target tidak diberikan.', reminders: [] };
+
+    console.log(`Finding targets for user ${userId} matching "${targetDescription}"`);
+    const searchPattern = `%${targetDescription.replace(/ /g, '%')}%`; // Basic keyword matching
+
+    const params = new URLSearchParams({
+        select: 'id,task_description,reminder_time', // Get needed info
+        user_id: `eq.${userId}`,
+        status: 'eq.pending',
+        task_description: `ilike.${searchPattern}`, // Case-insensitive partial match
+        order: 'reminder_time.asc'
+    });
+
+    try {
+        const response = await fetch(`${SUPABASE_URL}/rest/v1/reminders?${params.toString()}`, {
+            method: 'GET',
+            headers: SUPABASE_HEADERS
+        });
+
+        if (!response.ok) {
+            const errorBody = await response.text();
+            console.error(`Supabase find error (${response.status}): ${errorBody}`);
+            return { error: 'Gagal mencari pengingat di database.', reminders: [] };
+        }
+
+        const reminders = await response.json();
+        console.log(`Found ${reminders.length} potential targets.`);
+        return { error: null, reminders: reminders };
+
+    } catch (dbError) {
+        console.error("Error finding reminder targets:", dbError);
+        return { error: 'Gagal saat nyari pengingat di database, mungkin ada gangguan koneksi.', reminders: [] };
+    }
+}
+
+// Main handler logic for DELETE_REMINDER intent
+async function handleDeleteReminder(userId, data) {
+    const { target } = data;
+
+    if (!target) {
+        await sendWhatsAppMessage(userId, "Mau hapus pengingat yang mana nih? Kasih tau kata kuncinya ya (contoh: 'hapus pengingat meeting').");
+        return;
+    }
+
+    const findResult = await findReminderTargets(userId, target);
+
+    if (findResult.error && !findResult.reminders.length) {
+        await sendWhatsAppMessage(userId, findResult.error);
+        return;
+    }
+
+    if (findResult.reminders.length === 0) {
+        await sendWhatsAppMessage(userId, `Nggak nemu pengingat aktif yang cocok sama "${target}". Coba cek daftar pengingatmu dulu?`);
+        return;
+    }
+
+    if (findResult.reminders.length > 1) {
+        // Handle Ambiguity (Simple Version)
+        let replyMessage = `Ditemukan lebih dari satu pengingat yang cocok dengan "${target}":\n`;
+        findResult.reminders.forEach((r, index) => {
+            const reminderDate = parseISO(r.reminder_time);
+            const formattedTime = format(reminderDate, "d MMM HH:mm");
+            replyMessage += `${index + 1}. ${r.task_description} (${formattedTime})\n`;
+        });
+        replyMessage += "\nMohon berikan deskripsi yang lebih spesifik untuk dihapus.";
+        await sendWhatsAppMessage(userId, replyMessage.trim());
+        return;
+    }
+
+    // Exactly one reminder found
+    const reminderToDelete = findResult.reminders[0];
+    console.log(`Attempting to delete reminder ID: ${reminderToDelete.id}`);
+
+    try {
+        const response = await fetch(`${SUPABASE_URL}/rest/v1/reminders?id=eq.${reminderToDelete.id}`, {
+            method: 'DELETE',
+            headers: SUPABASE_HEADERS
+        });
+
+        if (!response.ok) {
+            const errorBody = await response.text();
+            throw new Error(`Supabase delete error (${response.status}): ${errorBody}`);
+        }
+
+        console.log(`Successfully deleted reminder ID: ${reminderToDelete.id}`);
+        const taskDesc = reminderToDelete.task_description || '(tanpa deskripsi)';
+        await sendWhatsAppMessage(userId, `Oke, pengingat untuk "${taskDesc}" telah dihapus.`);
+
+    } catch (dbError) {
+        console.error("Error deleting reminder:", dbError);
+        await sendWhatsAppMessage(userId, "Gagal ngehapus pengingat dari database. Mungkin koneksi lagi gangguan.");
+    }
+}
+
+// Main handler logic for EDIT_REMINDER intent
+async function handleEditReminder(userId, data) {
+    const { target, updates } = data;
+
+    if (!target) {
+        await sendWhatsAppMessage(userId, "Mau ubah pengingat yang mana nih? Kasih tau kata kuncinya ya.");
+        return;
+    }
+    if (!updates || (!updates.task && !updates.time)) {
+         await sendWhatsAppMessage(userId, "Mau diubah jadi apa nih? Kasih tau detailnya ya (contoh: 'ubah jadi meeting penting' atau 'ubah waktunya jadi besok jam 2 siang').");
+         return;
+    }
+
+    const findResult = await findReminderTargets(userId, target);
+
+    if (findResult.error && !findResult.reminders.length) {
+        await sendWhatsAppMessage(userId, findResult.error);
+        return;
+    }
+
+    if (findResult.reminders.length === 0) {
+        await sendWhatsAppMessage(userId, `Nggak nemu pengingat aktif yang cocok sama "${target}" buat diubah. Coba cek daftar pengingatmu dulu?`);
+        return;
+    }
+
+    if (findResult.reminders.length > 1) {
+        // Handle Ambiguity (Simple Version) - Sama seperti delete
+         let replyMessage = `Ditemukan lebih dari satu pengingat yang cocok dengan "${target}":\n`;
+         findResult.reminders.forEach((r, index) => {
+             const reminderDate = parseISO(r.reminder_time);
+             const formattedTime = format(reminderDate, "d MMM HH:mm");
+             replyMessage += `${index + 1}. ${r.task_description} (${formattedTime})\n`;
+         });
+         replyMessage += "\nMohon berikan deskripsi yang lebih spesifik untuk diubah.";
+         await sendWhatsAppMessage(userId, replyMessage.trim());
+         return;
+    }
+
+    // Exactly one reminder found
+    const reminderToEdit = findResult.reminders[0];
+    console.log(`Attempting to edit reminder ID: ${reminderToEdit.id}`);
+
+    const patchData = {};
+    let newTimeISO = null;
+
+    // Prepare new data
+    if (updates.task) {
+        patchData.task_description = updates.task;
+    }
+    if (updates.time) {
+        // Parse the new time string
+        newTimeISO = parseNaturalLanguageTime(updates.time);
+        if (!newTimeISO) {
+             await sendWhatsAppMessage(userId, `Waduh, format waktu barunya ("${updates.time}") agak aneh nih. Perubahan dibatalkan. Coba pakai format lain ya.`);
+             return; // Stop edit if new time is invalid
+        }
+        patchData.reminder_time = newTimeISO;
+    }
+
+    // Check if there's anything to update
+     if (Object.keys(patchData).length === 0) {
+         await sendWhatsAppMessage(userId, "Tidak ada perubahan valid yang bisa diterapkan.");
+         return;
+     }
+
+    try {
+        console.log(`Patching reminder ID ${reminderToEdit.id} with data:`, patchData);
+        const response = await fetch(`${SUPABASE_URL}/rest/v1/reminders?id=eq.${reminderToEdit.id}`, {
+            method: 'PATCH',
+            headers: SUPABASE_HEADERS,
+            body: JSON.stringify(patchData)
+        });
+
+        if (!response.ok) {
+            const errorBody = await response.text();
+            throw new Error(`Supabase patch error (${response.status}): ${errorBody}`);
+        }
+
+        console.log(`Successfully updated reminder ID: ${reminderToEdit.id}`);
+        // Construct confirmation message based on what was changed
+        const updatedTask = patchData.task_description || reminderToEdit.task_description;
+        const finalTimeISO = patchData.reminder_time || reminderToEdit.reminder_time;
+        const finalDate = parseISO(finalTimeISO);
+        const formattedFinalTime = format(finalDate, "d MMMM yyyy 'jam' HH:mm");
+        const confirmation = `Oke, pengingat untuk "${updatedTask}" sekarang diatur pada ${formattedFinalTime}.`;
+
+        await sendWhatsAppMessage(userId, confirmation);
+
+    } catch (dbError) {
+        console.error("Error updating reminder:", dbError);
+        await sendWhatsAppMessage(userId, "Gagal ngubah pengingat di database. Mungkin koneksi lagi gangguan.");
+    }
+}
 
 // --- Express App Setup ---
 const app = express();
@@ -179,7 +367,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
                 console.log(`Intent: ADD_REMINDER, Task: "${task}", Time String: "${timeString}"`);
 
                 if (!task || !timeString) {
-                    await sendWhatsAppMessage(userId, "Maaf, saya butuh deskripsi tugas dan waktunya untuk membuat pengingat.");
+                    await sendWhatsAppMessage(userId, "Hmm, kayaknya deskripsi tugas atau waktunya kurang jelas deh. Coba lagi ya. Contoh: 'Ingatkan aku meeting penting besok jam 10'.");
                     break;
                 }
 
@@ -187,7 +375,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
                 const reminderTimeISO = parseNaturalLanguageTime(timeString);
 
                 if (!reminderTimeISO) {
-                    await sendWhatsAppMessage(userId, `Maaf, saya tidak mengerti format waktu "${timeString}". Coba format lain (misal: "besok jam 10 pagi").`);
+                    await sendWhatsAppMessage(userId, `Waduh, format waktunya "${timeString}" agak aneh nih. Coba format lain, misal 'besok jam 10 pagi' atau '3 jam lagi'.`);
                     break;
                 }
 
@@ -220,7 +408,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
 
                 } catch (dbError) {
                     console.error("Error saving reminder to Supabase:", dbError);
-                    await sendWhatsAppMessage(userId, "Maaf, terjadi kesalahan saat menyimpan pengingat. Coba lagi nanti.");
+                    await sendWhatsAppMessage(userId, "Gagal nyimpen pengingat di database nih. Mungkin koneksi lagi gangguan. Coba beberapa saat lagi ya.");
                 }
                 break;
 
@@ -263,7 +451,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
 
                 } catch (dbError) {
                     console.error("Error fetching reminders from Supabase:", dbError);
-                    await sendWhatsAppMessage(userId, "Maaf, terjadi kesalahan saat mengambil daftar pengingat.");
+                    await sendWhatsAppMessage(userId, "Gagal ngambil daftar pengingat dari database. Mungkin koneksi lagi gangguan.");
                 }
                 break;
 
@@ -272,7 +460,14 @@ app.post('/webhook/whatsapp', async (req, res) => {
             case 'UNKNOWN':
             default:
                 console.log("Intent: UNKNOWN or Gemini Error");
-                const errorMessage = analysis.error ? `Error: ${analysis.error}` : "Maaf, saya tidak mengerti maksudmu. Coba katakan seperti 'Ingatkan aku [tugas] [waktu]' atau 'Lihat pengingatku'.";
+                let errorMessage = "Waduh, aku bingung nih sama pesanmu.";
+                if (analysis.error) {
+                    // Jika ada error spesifik dari Gemini
+                    errorMessage = `Hmm, ada masalah pas coba ngertiin pesanmu (Error: ${analysis.error}). Coba lagi ya.`;
+                } else {
+                    // Jika intent tidak dikenali
+                    errorMessage = "Maaf, aku belum ngerti maksudnya. Coba bilang:\n- 'Ingatkan aku [tugas] [waktu]'\n- 'Lihat pengingatku'\n- 'Hapus pengingat [kata kunci]'\n- 'Ubah pengingat [kata kunci] jadi [perubahan]'";
+                }
                 await sendWhatsAppMessage(userId, errorMessage);
                 break;
         }
@@ -281,7 +476,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
         // Catch any unexpected errors during processing
         console.error("!!! Unhandled error in webhook processing:", error);
         // Send a generic error message to the user
-        await sendWhatsAppMessage(userId, "Waduh, ada masalah internal nih. Coba lagi beberapa saat ya.");
+        await sendWhatsAppMessage(userId, "Waduh, ada error tak terduga nih di sistem internal. Aku udah catet masalahnya, coba lagi nanti ya.");
     }
 });
 
