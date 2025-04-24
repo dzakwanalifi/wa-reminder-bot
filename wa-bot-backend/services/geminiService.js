@@ -11,6 +11,11 @@ const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 const geminiModel = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
 // Define the expected JSON response schema from Gemini
+// Debug logging for Type
+console.log("--- DEBUG: Checking Type before schema definition ---");
+console.log("Value of Type:", Type);
+console.log("Value of Type.OBJECT:", Type ? Type.OBJECT : 'Type is undefined');
+console.log("--- END DEBUG ---");
 const GEMINI_RESPONSE_SCHEMA = {
     type: Type.OBJECT,
     properties: {
