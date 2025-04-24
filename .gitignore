@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Environment variables
+.env
+
+# WhatsApp session data (path relatif dari root repo)
+whatsapp-bridge/.wwebjs_auth/
+
+# Logs
+*.log
+logs/
+*.log.*.[0-9]
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# Optional: Operating system generated files
+.DS_Store
+Thumbs.db
+
+# Optional: PM2 files (jika kebetulan tersimpan di sini)
+.pm2/
+ecosystem.config.js.dump.*
+
+# Jika kamu menggunakan ecosystem.config.js dan MENYIMPAN KREDENSIAL di dalamnya (TIDAK DISARANKAN),
+# maka uncomment baris di bawah ini. Jika tidak, biarkan terkomentar agar file konfigurasinya tersimpan.
+# whatsapp-bridge/ecosystem.config.js
